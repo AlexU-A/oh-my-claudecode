@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { spawnSync } from 'child_process';
-import { getContract, buildLaunchArgs, buildWorkerArgv, buildWorkerCommand, getWorkerEnv, parseCliOutput, isPromptModeAgent, getPromptModeArgs, isCliAvailable } from '../model-contract.js';
+import { getContract, buildLaunchArgs, buildWorkerArgv, buildWorkerCommand, getWorkerEnv, parseCliOutput, isPromptModeAgent, getPromptModeArgs, isCliAvailable, resolveBinaryPath, resolveValidatedBinaryPath } from '../model-contract.js';
 
 vi.mock('child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('child_process')>();
@@ -67,9 +67,14 @@ describe('model-contract', () => {
   });
 
   describe('buildWorkerArgv', () => {
-    it('builds binary + args', () => {
-      expect(buildWorkerArgv('codex', { teamName: 'my-team', workerName: 'worker-1', cwd: '/tmp' })).toEqual([
-        'codex',
+    it('builds binary + args using pinned absolute path', () => {
+      expect(buildWorkerArgv('codex', {
+        teamName: 'my-team',
+        workerName: 'worker-1',
+        cwd: '/tmp',
+        resolvedBinaryPath: '/usr/local/bin/codex',
+      })).toEqual([
+        '/usr/local/bin/codex',
         '--dangerously-bypass-approvals-and-sandbox',
       ]);
     });
@@ -88,15 +93,33 @@ describe('model-contract', () => {
     });
   });
 
-  describe('isCliAvailable', () => {
-    it('passes shell: true to spawnSync so .cmd wrappers are found on Windows', () => {
+  describe('binary resolution and availability', () => {
+    it('resolveBinaryPath returns absolute path from resolver output', () => {
       const mockSpawnSync = vi.mocked(spawnSync);
-      mockSpawnSync.mockReturnValue({ status: 0, stdout: '', stderr: '', pid: 0, output: [], signal: null });
+      mockSpawnSync.mockReturnValueOnce({ status: 0, stdout: '/usr/local/bin/codex\n', stderr: '', pid: 0, output: [], signal: null } as any);
 
-      isCliAvailable('codex');
+      expect(resolveBinaryPath('codex')).toBe('/usr/local/bin/codex');
+      expect(mockSpawnSync).toHaveBeenCalledWith('which', ['codex'], { timeout: 5000, shell: false, encoding: 'utf-8' });
+      mockSpawnSync.mockReset();
+    });
 
-      expect(mockSpawnSync).toHaveBeenCalledWith('codex', ['--version'], { timeout: 5000, shell: true });
-      mockSpawnSync.mockRestore();
+    it('resolveValidatedBinaryPath verifies resolved binary with --version', () => {
+      const mockSpawnSync = vi.mocked(spawnSync);
+      mockSpawnSync
+        .mockReturnValueOnce({ status: 0, stdout: '/usr/local/bin/codex\n', stderr: '', pid: 0, output: [], signal: null } as any)
+        .mockReturnValueOnce({ status: 0, stdout: 'Codex 1.0.0\n', stderr: '', pid: 0, output: [], signal: null } as any);
+
+      expect(resolveValidatedBinaryPath('codex')).toBe('/usr/local/bin/codex');
+      expect(mockSpawnSync).toHaveBeenNthCalledWith(2, '/usr/local/bin/codex', ['--version'], { timeout: 5000, shell: false });
+      mockSpawnSync.mockReset();
+    });
+
+    it('isCliAvailable returns false when binary cannot be resolved', () => {
+      const mockSpawnSync = vi.mocked(spawnSync);
+      mockSpawnSync.mockReturnValueOnce({ status: 1, stdout: '', stderr: 'not found', pid: 0, output: [], signal: null } as any);
+
+      expect(isCliAvailable('codex')).toBe(false);
+      mockSpawnSync.mockReset();
     });
   });
 

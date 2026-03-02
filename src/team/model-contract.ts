@@ -1,4 +1,5 @@
 import { spawnSync } from 'child_process';
+import { isAbsolute } from 'path';
 import { validateTeamName } from './team-name.js';
 
 export type CliAgentType = 'claude' | 'codex' | 'gemini';
@@ -21,6 +22,8 @@ export interface WorkerLaunchConfig {
   model?: string;
   cwd: string;
   extraFlags?: string[];
+  /** Optional pre-resolved absolute binary path from preflight validation */
+  resolvedBinaryPath?: string;
 }
 
 const CONTRACTS: Record<CliAgentType, CliAgentContract> = {
@@ -93,23 +96,56 @@ export function getContract(agentType: CliAgentType): CliAgentContract {
   return contract;
 }
 
-export function isCliAvailable(agentType: CliAgentType): boolean {
+export function resolveBinaryPath(binary: string): string | null {
+  if (isAbsolute(binary)) return binary;
+
+  const resolver = process.platform === 'win32' ? 'where' : 'which';
+  const resolveResult = spawnSync(resolver, [binary], {
+    timeout: 5000,
+    shell: process.platform === 'win32',
+    encoding: 'utf-8',
+  });
+
+  if (resolveResult.status !== 0) return null;
+
+  const resolvedPath = resolveResult.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+
+  if (!resolvedPath || !isAbsolute(resolvedPath)) return null;
+  return resolvedPath;
+}
+
+export function resolveValidatedBinaryPath(agentType: CliAgentType): string {
   const contract = getContract(agentType);
+  const resolvedBinaryPath = resolveBinaryPath(contract.binary);
+  if (!resolvedBinaryPath) {
+    throw new Error(`CLI agent '${agentType}' not found. ${contract.installInstructions}`);
+  }
+
+  const result = spawnSync(resolvedBinaryPath, ['--version'], {
+    timeout: 5000,
+    shell: process.platform === 'win32',
+  });
+  if (result.status !== 0) {
+    throw new Error(`CLI agent '${agentType}' not found. ${contract.installInstructions}`);
+  }
+
+  return resolvedBinaryPath;
+}
+
+export function isCliAvailable(agentType: CliAgentType): boolean {
   try {
-    const result = spawnSync(contract.binary, ['--version'], { timeout: 5000, shell: true });
-    return result.status === 0;
+    resolveValidatedBinaryPath(agentType);
+    return true;
   } catch {
     return false;
   }
 }
 
 export function validateCliAvailable(agentType: CliAgentType): void {
-  if (!isCliAvailable(agentType)) {
-    const contract = getContract(agentType);
-    throw new Error(
-      `CLI agent '${agentType}' not found. ${contract.installInstructions}`
-    );
-  }
+  resolveValidatedBinaryPath(agentType);
 }
 
 export function buildLaunchArgs(agentType: CliAgentType, config: WorkerLaunchConfig): string[] {
@@ -119,8 +155,16 @@ export function buildLaunchArgs(agentType: CliAgentType, config: WorkerLaunchCon
 export function buildWorkerArgv(agentType: CliAgentType, config: WorkerLaunchConfig): string[] {
   validateTeamName(config.teamName);
   const contract = getContract(agentType);
+  const resolvedBinaryPath = config.resolvedBinaryPath
+    ? (isAbsolute(config.resolvedBinaryPath) ? config.resolvedBinaryPath : null)
+    : resolveBinaryPath(contract.binary);
+
+  if (!resolvedBinaryPath) {
+    throw new Error(`CLI agent '${agentType}' not found. ${contract.installInstructions}`);
+  }
+
   const args = buildLaunchArgs(agentType, config);
-  return [contract.binary, ...args];
+  return [resolvedBinaryPath, ...args];
 }
 
 export function buildWorkerCommand(agentType: CliAgentType, config: WorkerLaunchConfig): string {
